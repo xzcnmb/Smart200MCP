@@ -13,9 +13,9 @@ import tempfile
 
 from mcp.server import MCPServer
 
-from . import container, online, project, ui, awl, engine, paths, stlcheck, autoflow
+from . import container, online, project, ui, awl, engine, paths, stlcheck, autoflow, pointmap, xref, monitor, plceng
 
-mcp = MCPServer("smart200", version="0.3.0")
+mcp = MCPServer("smart200", version="0.6.0")
 
 
 @mcp.tool()
@@ -28,8 +28,9 @@ def smart_doctor() -> dict:
     return {
         "ok": not missing,
         "仓库根": paths.ROOT,
-        "引擎DLL": paths.DLL,
-        "注入器": paths.INJECTOR,
+        "引擎DLL": paths.engine_dll(),
+        "注入器": paths.injector(),
+        "V2.8": paths.is_v28(),
         "MicroWIN": (paths.mwsmart() if not missing else "未找到"),
         "空白模板": paths.blank_template() or "未找到（新建工程会失败，可传 project_path 绕开）",
         "脚本超时秒": engine.SCRIPT_TIMEOUT,
@@ -112,10 +113,15 @@ def smart_plc_info(ip: str) -> dict:
 
 
 @mcp.tool()
-def smart_plc_read(ip: str, addresses: list[str]) -> dict:
-    """读一批地址，如 ["VW100","V10.3","QB0"]。V 区映射为 DB1。⚠ 未经真机验证。"""
+def smart_plc_read(ip: str, addresses: list[str], fmt: str = "auto") -> dict:
+    """读一批地址，如 ["VW100","V10.3","QB0"]。V 区映射为 DB1。⚠ 未经真机验证。
+
+    fmt 给这批地址统一解码格式：auto（按宽度给无符号整数/位给 bool）/
+    int（有符号16位）/ dint（有符号32位）/ real（IEEE754 浮点）/ string（Pascal 字符串）。
+    位地址（如 V10.3）恒返回 bool，忽略 fmt。
+    """
     with online.Plc(ip) as plc:
-        return {"ip": ip, "values": plc.read_many(addresses)}
+        return {"ip": ip, "values": plc.read_many(addresses, fmt or "auto")}
 
 
 @mcp.tool()
@@ -131,15 +137,317 @@ def smart_plc_write(ip: str, address: str, value: int, confirm: bool = False) ->
         return plc.write(address, value)
 
 
+# ---------- 在线监控 / 点位读取 / 点位图比对（snap7，同一套 S7 协议）----------
+
+def _safe_read_points(ip, points, m_bytes=0):
+    """按点位图逐地址读实时值；单个地址解析失败不拖垮整批。返回 (values, errors)。"""
+    values, errors = {}, []
+    with online.Plc(ip) as plc:
+        for p in points:
+            addr = p["address"]
+            try:
+                values[addr] = plc.read(addr, p.get("type") or "auto")
+            except online.OnlineError as e:
+                errors.append({"address": addr, "error": str(e)})
+    return values, errors
+
+
+@mcp.tool()
+def smart_plc_points(ip: str, di_count: int = 0, do_count: int = 0,
+                     include_m: bool = False, m_bytes: int = 0) -> dict:
+    """批量读 PLC 当前 I/Q（可选 M）全部点位，返回点位表。⚠ 未经真机验证。
+
+    直接对 PLC 读点位，不依赖工程文件 —— 适合"我有一份点位图，要核对现场 PLC
+    实际点位"的场景。di_count/do_count 缺省时按 CPU 型号自动定（读整字节无损，
+    会连同未用到的位一起返回，宁可多读不漏）。include_m=True 时额外读 m_bytes 个 M 字节。
+
+    返回 points = [{"address":"I0.0","value":true}, ...]，含 inputs/outputs 计数。
+    """
+    with online.Plc(ip) as plc:
+        info = plc.cpu_info()
+        module = info.get("module_type") or ""
+        pts = online.read_points(plc, di_count=di_count, do_count=do_count,
+                                 include_m=include_m, m_bytes=m_bytes,
+                                 module_type=module)
+    inputs = [p for p in pts if p[0].startswith("I")]
+    outputs = [p for p in pts if p[0].startswith("Q")]
+    mem = [p for p in pts if p[0].startswith("M")]
+    return {
+        "ip": ip,
+        "module_type": module,
+        "count": len(pts),
+        "input_count": len(inputs),
+        "output_count": len(outputs),
+        "memory_count": len(mem),
+        "points": [{"address": a, "value": v} for a, v in pts],
+    }
+
+
+@mcp.tool()
+def smart_plc_monitor(ip: str, addresses: list[str], interval: float = 0.5,
+                      duration: float = 0.0, max_samples: int = 0,
+                      fmt: str = "auto") -> dict:
+    """实时轮询监控一批地址，返回时间序列（对标 STEP 7 状态图表）。⚠ 未经真机验证。
+
+    每隔 interval 秒读一次 addresses，直到 duration 秒或 max_samples 个采样
+    （两者都设取先到的；都不设默认采 5 个）。返回每个采样的值与相对上一采样的
+    变化点，外加 latest（最新值）与 changed_overall（全程变过的地址）。
+
+    用途：看某个 I 点被触发、某个 V 字在程序里累加、某个 Q 点输出翻转的过程。
+    addresses 如 ["I0.0","Q0.0","VW100"]。fmt 给这批地址统一解码格式（同 smart_plc_read）。
+    """
+    result = online.monitor(ip, addresses, interval=interval, duration=duration,
+                            max_samples=max_samples, fmt=fmt or "auto")
+    return result
+
+
+@mcp.tool()
+def smart_plc_compare_pointmap(ip: str, pointmap_path: str) -> dict:
+    """用点位图核对 PLC 当前点位：读点位图 → 读 PLC 实时值 → 逐点比对。⚠ 未经真机验证。
+
+    点位图支持 JSON / CSV / TXT / XLSX（格式见 pointmap.parse_pointmap）：
+      每行至少一列【地址】（I0.0 / Q0.0 / VB0 / VW100 / M0.0 …），可选
+      【名称】【类型(BOOL/INT/REAL/… )】【期望值】。
+    有期望值时逐点判一致/不一致；没有期望值就只回填实时值（等于给点位图补上现场状态）。
+
+    返回 points（地址/名称/类型/期望/实际/是否一致）+ matched/mismatched/no_expected/missing
+    计数，以及 mismatches 明细。单个地址解析失败会记在 errors 里，不拖垮整批。
+    """
+    points = pointmap.parse_pointmap(path=pointmap_path)
+    if not points:
+        return {"ip": ip, "pointmap": pointmap_path, "error": "点位图里没解析到任何有效点位"}
+    values, errors = _safe_read_points(ip, points)
+    result = pointmap.compare(values, points)
+    result["ip"] = ip
+    result["pointmap"] = pointmap_path
+    if errors:
+        result["errors"] = errors
+    return result
+
+
+# ---------- 在线通讯（snap7）扩展：运行控制 / 时钟 / 诊断 / 块 ----------
+
+@mcp.tool()
+def smart_plc_run(ip: str, confirm: bool = False) -> dict:
+    """让 CPU 进入 RUN（热启动）。⚠ 改变现场设备运行状态，必须 confirm=True。未经真机验证。
+
+    执行前后各读一次 CPU 状态（SZL 0x0424）回显。
+    """
+    if not confirm:
+        return {"refused": True,
+                "reason": "启停运行中的 PLC 是现场操作，需显式 confirm=True；且本层尚未真机验证"}
+    with online.Plc(ip) as plc:
+        return plc.plc_run()
+
+
+@mcp.tool()
+def smart_plc_stop(ip: str, confirm: bool = False) -> dict:
+    """让 CPU STOP。⚠ 停止运行中的 PLC 是现场操作，必须 confirm=True。未经真机验证。
+
+    执行前后各读一次 CPU 状态（SZL 0x0424）回显。
+    """
+    if not confirm:
+        return {"refused": True,
+                "reason": "启停运行中的 PLC 是现场操作，需显式 confirm=True；且本层尚未真机验证"}
+    with online.Plc(ip) as plc:
+        return plc.plc_stop()
+
+
+@mcp.tool()
+def smart_plc_time(ip: str, action: str = "read", value: str = "",
+                   confirm: bool = False) -> dict:
+    """读/设 CPU 时钟。action: read=读当前时间；set=设成 value（格式 "YYYY-MM-DD HH:MM:SS"）；
+    sync=同步成这台电脑的时间。写操作(set/sync)需 confirm=True。⚠ 未经真机验证。"""
+    import datetime
+    with online.Plc(ip) as plc:
+        if action == "read":
+            return {"ip": ip, "datetime": plc.get_datetime().isoformat(sep=" ")}
+        if not confirm:
+            return {"refused": True, "reason": "改 CPU 时钟需显式 confirm=True"}
+        if action == "sync":
+            return plc.sync_datetime()
+        if action == "set":
+            dt = datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+            return plc.set_datetime(dt)
+        raise online.OnlineError(f"未知 action {action!r}（read/set/sync）")
+
+
+@mcp.tool()
+def smart_plc_diag(ip: str) -> dict:
+    """实验性诊断探测：逐个试读候选 SZL（诊断缓冲/强制表/CP 信息/CPU 状态），
+    如实记录哪些读得通、原始内容长什么样。只读。
+
+    S7-200 SMART 没有公开的 SZL 支持清单 —— 这是真机首次接入时的摸底工具，
+    探通的再考虑转正式诊断工具。
+    """
+    with online.Plc(ip) as plc:
+        return {"ip": ip, "probes": plc.diag_probe()}
+
+
+@mcp.tool()
+def smart_plc_blocks(ip: str) -> dict:
+    """CPU 里的块计数（OB/FB/FC/DB/SDB/SFB/SFC）。只读。
+
+    ⚠ S7-200 SMART 的块到 S7 块类型的映射未经真机验证，先如实给原始计数，
+    真机核对后再解读（可用 smart_plc_diag 摸底）。
+    """
+    with online.Plc(ip) as plc:
+        return {"ip": ip, "blocks": plc.list_blocks()}
+
+
+@mcp.tool()
+def smart_xref(project_path: str) -> dict:
+    """全工程交叉引用（对标博图 cross-reference）。只读，不改工程。
+
+    产出：每个绝对地址被哪些块/网络/指令读写（读写方向按指令族启发式判定）、
+    每个块用了哪些地址和符号名、CALL/ATCH 调用图。
+    数据来源：引擎 EXPORT OB1（带出全部块）→ 离线解析。
+    """
+    return xref.for_project(project_path)
+
+
+@mcp.tool()
+def smart_monitor_program(ip: str, project_path: str, block_name: str = "") -> dict:
+    """程序段监控（对标 MicroWIN「程序监控」/ 博图 monitor block）。只读，不改 PLC 不改工程。
+
+    原理与软件一致：CPU 不上报"哪个网络导通"，监控 = 读操作数实时值 + 本地逐网络求值。
+    流程：引擎导出程序 → snap7 读实时值 → 每个网络给出 rung 导通状态、线圈状态、
+    操作数实时值、定时器/计数器状态。
+
+    block_name 留空 = 全部块；给了就只看那个块（块名或块号，如 "CYL_CTRL" 或 "SBR0"）。
+    ⚠ 在线层未经真机验证；SCR/JMP/FOR 等控制流网络标 approximate（不仿真跳转）；
+    有符号名的地址靠符号表映射，映射不了的网络 rung 为 null。
+    """
+    return monitor.monitor_project(ip, project_path, block_name)
+
+
+# ---------- 引擎路线 PLC 在线操作（下载/上传/启停/事件日志）----------
+# 走注入 DLL 的 GETADDR/PLCSTATE/SETOPMODE/DOWNLOAD/UPLOAD/EVENTLOG 命令，
+# 由软件自己的通信栈干活，连接参数取自工程配置。⚠ 全部未经真机验证。
+
+@mcp.tool()
+def smart_engine_status(project_path: str) -> dict:
+    """读 PLC 在线状态（引擎路线）：是否已连接、运行模式(RUN/STOP)、密码保护，
+    以及工程里配置的 PLC 连接点（IP/站号）。只读。⚠ 未经真机验证。
+
+    与 snap7 路线的 smart_plc_info 互补：这条走软件自己的通信栈，
+    连接参数就是工程里配的，不用另传 IP。
+    """
+    plceng.require_v28()
+    return plceng.status(project_path)
+
+
+@mcp.tool()
+def smart_engine_run(project_path: str, confirm: bool = False) -> dict:
+    """让 PLC 进入 RUN（引擎路线，COM_SetOpMode）。⚠ 现场操作，必须 confirm=True。未经真机验证。
+
+    与 snap7 路线的 smart_plc_run 区别：走软件通信栈、目标 PLC 取自工程配置。
+    """
+    plceng.require_v28()
+    if not confirm:
+        return {"refused": True,
+                "reason": "启停运行中的 PLC 是现场操作，需显式 confirm=True；且本层尚未真机验证"}
+    return plceng.set_opmode(project_path, "run")
+
+
+@mcp.tool()
+def smart_engine_stop(project_path: str, confirm: bool = False) -> dict:
+    """让 PLC STOP（引擎路线，COM_SetOpMode）。⚠ 现场操作，必须 confirm=True。未经真机验证。"""
+    plceng.require_v28()
+    if not confirm:
+        return {"refused": True,
+                "reason": "启停运行中的 PLC 是现场操作，需显式 confirm=True；且本层尚未真机验证"}
+    return plceng.set_opmode(project_path, "stop")
+
+
+@mcp.tool()
+def smart_plc_download(project_path: str, block_types: int = 0,
+                       confirm: bool = False) -> dict:
+    """【下载到 PLC】把工程程序下载到 CPU（引擎路线 PRJ_Download）。⚠ 必须 confirm=True。未经真机验证。
+
+    流程：读工程配置的 PLC 连接点 → 读连接/运行状态 → 下载 → 回读状态。
+    下载前请核对返回里的 accesspoint 就是目标 CPU —— 下错机是不可逆的。
+    BLOCK_TYPES 枚举未知，0=全部块（猜测值），真机首验时用 0/1/2 探测。
+    """
+    plceng.require_v28()
+    if not confirm:
+        return {"refused": True,
+                "reason": "下载会覆盖 PLC 里的程序，是不可逆现场操作，需显式 confirm=True；且本层尚未真机验证"}
+    return plceng.download(project_path, block_types=block_types)
+
+
+@mcp.tool()
+def smart_plc_upload(project_path: str, block_types: int = 0) -> dict:
+    """【从 PLC 上传程序】读回 CPU 里的程序（引擎路线 PRJ_Upload）。只读，不改 PLC 不改原工程。
+
+    上传到临时副本再导出成 AWL，返回各块的文本；原工程文件不动。
+    ⚠ 未经真机验证。想一键比对 PLC 与本地工程的差异，用 smart_plc_compare。
+    """
+    plceng.require_v28()
+    up = plceng.upload(project_path, block_types=block_types)
+    return {
+        "project": project_path,
+        "online": {"connected": up["state"]["connected"], "upload": up["upload"]},
+        "blocks": [{"name": b["name"], "id": b["id"], "kind": b["kind"],
+                    "networks": b["networks"]} for b in up["blocks"]],
+    }
+
+
+@mcp.tool()
+def smart_plc_compare(project_path: str) -> dict:
+    """【在线/离线差异报告】上传 CPU 程序与本地工程逐块比对指令流和网络数。
+
+    结论回答"现场 PLC 里的程序跟我手上这份差多少"。上传经副本，原工程不动。
+    ⚠ 未经真机验证；比对依据是指令流文本，压缩/等效改写不算差异。
+    """
+    plceng.require_v28()
+    return plceng.compare_plc(project_path)
+
+
+@mcp.tool()
+def smart_event_log(project_path: str) -> dict:
+    """读 PLC 事件日志（引擎路线 COM_GetEventLog）。只读。⚠ 未经真机验证。
+
+    ⚠ 事件条目结构尚未逆向，当前只回读条数；内容解析待真机校准。
+    """
+    plceng.require_v28()
+    return plceng.event_log(project_path)
+
+
 # ---------- UI 自动化 ----------
 
 @mcp.tool()
 def smart_ui_project_tree() -> dict:
-    """读取【已打开的】MicroWIN 里的工程：文件名、CPU 型号、POU 列表。已实测。
+    """读取【已打开的】MicroWIN 里的工程：文件名、CPU 型号、POU 列表。
 
-    只接管已打开的实例，不会替你启动软件或打开工程（以免顶掉你正编辑的工程）。
+    只接管已打开的实例读 CPU 与窗口标题；V2.8 项目树里「程序块」折叠、UIA 读不到
+    POU 子项，所以 POU 列表另起独立引擎实例 EXPORT 补全（不碰你正在编辑的窗口）。
     """
-    return ui.read_project_tree()
+    result = ui.read_project_tree()
+    d = result.get("project_dir")
+    pf = result.get("project_file")
+    proj = os.path.join(d, pf) if (d and pf) else None
+    if proj and os.path.exists(proj):
+        try:
+            tmpdir = tempfile.mkdtemp(prefix="smart200_pou_")
+            dump = os.path.join(tmpdir, "all.awl")
+            try:
+                pid = engine.launch_instance(proj)
+                try:
+                    engine.run_script(pid, ["EXPORT %s|%s" % (autoflow._ob1_name(proj), dump)])
+                finally:
+                    engine.kill_instance(pid)
+                if os.path.exists(dump) and os.path.getsize(dump) > 0:
+                    blocks = autoflow.split_blocks(autoflow._read(dump))
+                    result["pous"] = [{"name": b["name"], "id": b["id"], "kind": b["kind"]}
+                                      for b in blocks]
+                    result["pou_count"] = len(result["pous"])
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception as e:
+            result["pou_error"] = str(e)
+    result.pop("project_dir", None)
+    return result
 
 
 @mcp.tool()

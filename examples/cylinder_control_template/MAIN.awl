@@ -1,0 +1,7 @@
+ORGANIZATION_BLOCK MAIN:OB1
+TITLE=Two cylinder control template
+BEGIN
+Network 1
+	LD     SM0.0
+	CALL   CYL_CTRL
+END_ORGANIZATION_BLOCK

@@ -1,0 +1,131 @@
+SUBROUTINE_BLOCK PRESSURE_TEST:SBR0
+TITLE=Three single-solenoid cylinders and 10-channel pressure test
+// 暂定映射：右缸 Q0.4/I2.1，左缸 Q0.6/I2.5，上缸 Q1.0/I2.7
+// 步进位：M10.0待机 M10.1右缸 M10.2左缸 M10.3上缸
+//         M10.4采集1 M10.5泄气 M10.6采集2 M10.7保持
+BEGIN
+Network 1 // 上电初始化
+	LD     SM0.1
+	R      M10.0, 8
+	R      M0.0, 2
+	S      M10.0, 1
+Network 2 // 停止、急停或复位：回待机并撤销输出
+	LDN    I0.4
+	O      I0.1
+	O      I0.2
+	R      M10.0, 8
+	R      M0.0, 2
+	S      M10.0, 1
+Network 3 // 双手启动且三缸原点确认
+	LD     I0.3
+	A      I0.0
+	A      I2.2
+	A      I2.3
+	A      I0.4
+	A      I2.0
+	A      I2.4
+	A      I2.6
+	A      M10.0
+	S      M0.0, 1
+	R      M10.0, 1
+	S      M10.1, 1
+Network 4 // 右缸动点到位后转左缸
+	LD     M10.1
+	A      I2.1
+	R      M10.1, 1
+	S      M10.2, 1
+Network 5 // 左缸动点到位后转上缸
+	LD     M10.2
+	A      I2.5
+	R      M10.2, 1
+	S      M10.3, 1
+Network 6 // 上缸动点到位后开始第一段采集
+	LD     M10.3
+	A      I2.7
+	R      M10.3, 1
+	S      M10.4, 1
+Network 7 // 第一段采集15秒
+	LD     M10.4
+	TON    T37, 150
+
+Network 8
+	LD     T37
+	R      M10.4, 1
+	S      M10.5, 1
+
+Network 9 // 泄气2秒
+	LD     M10.5
+	TON    T38, 20
+
+Network 10
+	LD     T38
+	R      M10.5, 1
+	S      M10.6, 1
+
+Network 11 // 第二段采集15秒
+	LD     M10.6
+	TON    T39, 150
+
+Network 12
+	LD     T39
+	R      M10.6, 1
+	S      M10.7, 1
+
+Network 13 // 采集完成后保持15秒，再回待机
+	LD     M10.7
+	TON    T40, 150
+
+Network 14
+	LD     T40
+	R      M10.7, 1
+	R      M0.0, 1
+	S      M10.0, 1
+Network 15 // 单线圈阀：保持伸出直到流程结束
+	LD     M10.1
+	O      M10.2
+	O      M10.3
+	O      M10.4
+	O      M10.5
+	O      M10.6
+	O      M10.7
+	A      M0.0
+	=      Q0.4
+Network 16
+	LD     M10.2
+	O      M10.3
+	O      M10.4
+	O      M10.5
+	O      M10.6
+	O      M10.7
+	A      M0.0
+	=      Q0.6
+Network 17
+	LD     M10.3
+	O      M10.4
+	O      M10.5
+	O      M10.6
+	O      M10.7
+	A      M0.0
+	=      Q1.0
+Network 18 // 泄气阀仅在泄气步骤打开
+	LD     M10.5
+	A      M0.0
+	=      Q1.6
+Network 19 // 压力采集窗口（两段）
+	LD     M10.4
+	O      M10.5
+	O      M10.6
+	=      M20.0
+Network 20 // 10路原始值缓存：AE08-1 CH0..7，AE08-2 CH0..1
+	LD     M20.0
+	MOVW   AIW16, VW100
+	MOVW   AIW18, VW102
+	MOVW   AIW20, VW104
+	MOVW   AIW22, VW106
+	MOVW   AIW24, VW108
+	MOVW   AIW26, VW110
+	MOVW   AIW28, VW112
+	MOVW   AIW30, VW114
+	MOVW   AIW32, VW116
+	MOVW   AIW34, VW118
+END_SUBROUTINE_BLOCK

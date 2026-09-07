@@ -91,24 +91,47 @@ def _section(text, name):
     return "\n".join(lines[start:end])
 
 
+# 块结构关键字（V2.8 导出指令无 Tab 缩进，需靠关键字排除非指令行）
+_BLOCK_KW = {
+    "ORGANIZATION_BLOCK", "SUBROUTINE_BLOCK", "INTERRUPT_BLOCK", "PROGRAM_BLOCK",
+    "FUNCTION_BLOCK", "DATA_BLOCK", "BEGIN", "NETWORK", "VAR", "VAR_INPUT",
+    "VAR_OUTPUT", "VAR_IN_OUT", "VAR_TEMP", "VAR_GLOBAL", "END_VAR",
+}
+
+
 def _ops(text, dedup=True):
     """抽助记符。dedup=True 只留种类；False 返回完整指令流（按顺序、不去重）。
 
     第4关往返核对要用 dedup=False：只比对"种类集合"的话，
     同一助记符少了几条是看不出来的（源里 20 条 MOVW、回来只剩 3 条也算过），
     而这正是"被软件静默丢弃"最可能的形态。
+
+    兼容两种缩进：V3 导出指令带 Tab 缩进；V2.8 导出指令在行首无缩进。
+    靠"助记符后必须是空白/行尾"来排除 TITLE=xxx、MOD_EN:BOOL 这类非指令行，
+    靠 _BLOCK_KW 排除块结构关键字。
     """
     out = []
     for line in text.replace("\r\n", "\n").split("\n"):
+        s = line.strip()
+        if not s or s.startswith("//"):
+            continue
         # 首字符必须允许 = 和 + - * /：输出线圈是 "="、立即输出 "=I"，
         # 算术指令是 "+I" "-D" "*R" "/D" 这一族。只写 [A-Z] 会把它们【整族漏掉】，
         # 往返核对就等于从没检查过线圈和四则运算（2026-08-25 被单测抓出来）。
-        m = re.match(r"\t([A-Z=+\-*/][A-Z0-9_=<>+\-*/.]*)", line)
+        m = re.match(r"([A-Z=+\-*/][A-Z0-9_=<>+\-*/.]*)(?=\s|$)", s)
         if not m:
             continue
-        if dedup and m.group(1) in out:
+        tok = m.group(1)
+        if tok.upper() in _BLOCK_KW or tok.upper().startswith("END_"):
             continue
-        out.append(m.group(1))
+        # 排除 TITLE=xxx 这类声明行：合法助记符里含 "=" 的只有线圈 "=" / "=I"
+        # 和比较指令 ">=I" "<>I" 等，它们都以符号开头，绝不以字母开头。
+        # 以字母开头又带 "=" 的是 KEY=value 声明（TITLE=、KEY=），不是指令。
+        if "=" in tok and tok[0].isalpha():
+            continue
+        if dedup and tok in out:
+            continue
+        out.append(tok)
     return out
 
 
@@ -348,8 +371,14 @@ def deploy(awl_files, project_path=None, template=None, open_after=False,
     # SAVEAS 到临时文件，实例退出后再替换回去。
     # 临时文件必须保持同样的扩展名 —— SAVEAS 是按扩展名认格式的
     _stem, _ext = os.path.splitext(project_path)
-    tmp_proj = _stem + "_saveas_tmp" + _ext
-    cmds.append("SAVEAS " + tmp_proj)
+    if paths.is_v28():
+        # V2.8：SAVEAS 会崩（内部拷贝存储路径需字符串管理器），且只有 .smart 格式、
+        # 无 .smartV3→.smart 静默转换问题，直接 SAVE 到当前文件即可。
+        tmp_proj = project_path
+        cmds.append("SAVE")
+    else:
+        tmp_proj = _stem + "_saveas_tmp" + _ext
+        cmds.append("SAVEAS " + tmp_proj)
 
     # 第1~4关全在同一个内存实例里判，证明不了"落没落盘"。
     # 记下导入前的文件指纹，收工后比对 —— 这是独立于软件自报成功的判据。
@@ -363,10 +392,14 @@ def deploy(awl_files, project_path=None, template=None, open_after=False,
             engine.kill_instance(pid)
 
     # ---- 落盘：SAVEAS 的产物换回 project_path，并留下证据供第5关判定 ----
-    persisted = {"saveas_target": tmp_proj, "produced": os.path.exists(tmp_proj)}
-    if persisted["produced"]:
-        persisted["bytes"] = os.path.getsize(tmp_proj)
-        os.replace(tmp_proj, project_path)
+    if tmp_proj == project_path:
+        # V2.8 SAVE 直接写当前文件，无需替换；是否真写盘由下方指纹比对判定
+        persisted = {"save_target": project_path, "produced": os.path.exists(project_path)}
+    else:
+        persisted = {"saveas_target": tmp_proj, "produced": os.path.exists(tmp_proj)}
+        if persisted["produced"]:
+            persisted["bytes"] = os.path.getsize(tmp_proj)
+            os.replace(tmp_proj, project_path)
     # SAVE 的老毛病会在这里留下痕迹：同名 .smart 是 PRJ_Save 干的，不该出现
     stray = _stem + ".smart"
     if _ext.lower() != ".smart" and os.path.exists(stray):
@@ -584,6 +617,24 @@ def _safe_filename(name):
     return s or "unnamed"
 
 
+def _ob1_name(project_path):
+    """探测 OB1（主程序）块名。中文版默认「主程序」，英文版默认 MAIN。
+
+    引擎导出「OB1 会把所有块一起带出来」，所以导出全块要先拿到 OB1 名。
+    从离线解析的字符串里探测候选名，探不到就回退 MAIN。
+    """
+    from . import container, strings
+    try:
+        proj = container.load(project_path)
+        texts = strings.texts(proj.data)
+        for cand in ("主程序", "MAIN", "Main", "OB1"):
+            if cand in texts:
+                return cand
+    except Exception:
+        pass
+    return "MAIN"
+
+
 def export_all_blocks(project_path, out_dir, encoding="utf-8"):
     """把工程里【所有】POU 各导出成一个 .awl 文件，不用先知道块名。
 
@@ -607,7 +658,7 @@ def export_all_blocks(project_path, out_dir, encoding="utf-8"):
         try:
             # 顺带把符号表也读出来 —— 同一次注入干两件事，省一次启动(~30s)。
             # 导出件里用的是符号名，没有这张表就导不回去，必须一起给。
-            log = engine.run_script(pid, ["EXPORT MAIN|" + dump, "SYMDUMP x"])
+            log = engine.run_script(pid, ["EXPORT %s|%s" % (_ob1_name(project_path), dump), "SYMDUMP x"])
         finally:
             engine.kill_instance(pid)
         if not enginelog.done(log):
@@ -719,7 +770,7 @@ def project_overview(project_path):
     try:
         pid = engine.launch_instance(project_path)
         try:
-            log = engine.run_script(pid, ["EXPORT MAIN|" + dump, "SYMDUMP ALL"])
+            log = engine.run_script(pid, ["EXPORT %s|%s" % (_ob1_name(project_path), dump), "SYMDUMP ALL"])
         finally:
             engine.kill_instance(pid)
         if not enginelog.done(log):
@@ -827,10 +878,15 @@ def set_symbols(project_path, symbols):
         raise FlowError("工程不存在：" + project_path)
     backup = backup_project(project_path)      # 改工程之前先留退路
     stem, ext = os.path.splitext(project_path)
-    tmp = stem + "_saveas_tmp" + ext
     cmds = ["SYMSET %s|%s" % (addr, name) for name, addr in symbols.items()]
-    # COMPILE 排在 SAVEAS 之前：编译不过就别存了
-    cmds += ["GVTCOMPILE x", "COMPILE", "SAVEAS " + tmp]
+    # COMPILE 排在 SAVEAS/SAVE 之前：编译不过就别存了
+    if paths.is_v28():
+        # V2.8 SAVEAS 会崩（字符串管理器），且符号表随 SAVE 落盘，直接 SAVE 当前文件
+        tmp = project_path
+        cmds += ["GVTCOMPILE x", "COMPILE", "SAVE"]
+    else:
+        tmp = stem + "_saveas_tmp" + ext
+        cmds += ["GVTCOMPILE x", "COMPILE", "SAVEAS " + tmp]
     pid = engine.launch_instance(project_path)
     try:
         log = engine.run_script(pid, cmds)
@@ -845,7 +901,8 @@ def set_symbols(project_path, symbols):
               "backup": backup}
 
     if compile_ok and os.path.exists(tmp):
-        os.replace(tmp, project_path)
+        if tmp != project_path:
+            os.replace(tmp, project_path)
         result["all_ok"] = syms_ok
         return result
 

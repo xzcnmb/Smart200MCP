@@ -38,14 +38,16 @@ io.open(p, "wb").write(b"A" * 100)
 io.open(p + "2", "wb").write(b"C" * 100)
 check("等长不同内容能分辨", autoflow._fingerprint(p) != autoflow._fingerprint(p + "2"))
 
-print("=== 源码防回归：落盘不许用 SAVE ===")
+print("=== 源码防回归：V3 落盘不许用 SAVE ===")
 src = io.open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "smart200_mcp", "autoflow.py"), encoding="utf-8").read()
 # 去掉注释行再找，免得被说明文字里的 "SAVE" 误伤
 code = "\n".join(l for l in src.split("\n") if not l.strip().startswith("#"))
 bare_save = re.findall(r'["\']SAVE["\']|["\']SAVE\s', code)
-check("autoflow 里没有裸 SAVE 命令", not bare_save, bare_save)
+# V2.8 移植后 SAVE 只在 paths.is_v28() 分支里出现（V2.8 的 SAVEAS 会崩）；
+# V3 落盘仍必须 SAVEAS。这里防的是【无条件】回退成 SAVE。
 check("落盘走的是 SAVEAS", '"SAVEAS ' in code)
+check("SAVE 只在 V2.8 分支里出现", "is_v28()" in code, bare_save)
 check("deploy 会做第5关落盘校验", "stage5_persisted" in code)
 check("set_symbols 编译不过会回滚", "rolled_back" in code)
 

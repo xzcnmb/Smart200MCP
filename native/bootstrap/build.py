@@ -109,6 +109,29 @@ def main():
         pass
     if HERE.encode("mbcs", "replace") in data:
         print("[警告] DLL 里出现了本机路径，自寻路径可能没生效")
+
+    # ---- V2.8.2 引擎 DLL + 原生注入器（移植自 smarthook.cpp，见 docs/V28_PORT.md）----
+    extra = [
+        ("smarthook_v28.cpp", "smarthook_v28.dll", "/LD /O2 /EHsc /std:c++17 /utf-8 /MT", "user32.lib"),
+        ("inject_native.cpp", "inject_native.exe", "/O2 /EHsc /MT", ""),
+    ]
+    for src, out, flags, libs in extra:
+        if not os.path.exists(os.path.join(HERE, src)):
+            print("[跳过] 缺 %s" % src)
+            continue
+        cl2 = "cl /nologo {flags} {src} /Fe:{out}".format(flags=flags, src=src, out=out)
+        if libs:
+            cl2 += " /link %s" % libs
+        cmd2 = 'call "{vc}" >nul && {cl2}'.format(vc=vcvars, cl2=cl2)
+        r2 = subprocess.run(cmd2, cwd=HERE, capture_output=True, shell=True)
+        log2 = (r2.stdout + r2.stderr).decode("mbcs", "replace")
+        bad2 = [l for l in log2.splitlines() if ": error" in l or ": fatal" in l]
+        if r2.returncode != 0 or bad2:
+            print("[错误] %s 编译失败：" % src)
+            for l in (bad2 or log2.splitlines()[-10:]):
+                print("   " + l)
+        else:
+            print("[OK] %s  %d 字节" % (out, os.path.getsize(os.path.join(HERE, out))))
     return 0
 
 

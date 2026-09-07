@@ -23,7 +23,11 @@ ANSI = "mbcs"
 _BLOCK_HEAD = re.compile(r"^(SUBROUTINE_BLOCK|PROGRAM_BLOCK|ORGANIZATION_BLOCK|INTERRUPT_BLOCK|DATA_BLOCK)\s+(.+?):(\w+)\s*$")
 _BLOCK_END = re.compile(r"^END_(SUBROUTINE_BLOCK|PROGRAM_BLOCK|ORGANIZATION_BLOCK|INTERRUPT_BLOCK|DATA_BLOCK)\s*$")
 _NETWORK = re.compile(r"^Network\s+(\d+)\s*$")
-_INSTR = re.compile(r"^[\t ]+([A-Z][A-Z0-9=]*)\b\s*(.*)$")
+# 指令行：缩进可有可无（V3 导出带 Tab；V2.8 引擎导出在行首无缩进）。
+# 首字符允许 = + - * /（线圈 "="、立即输出 "=I"、四则运算 +I -D *R /D 这一族），
+# 助记符后必须跟空白或行尾 —— 借此排除 TITLE=xxx、NAME:BOOL 这类非指令行。
+# 块结构关键字/Network/TITLE/BEGIN/注释都在前面先拦掉了，到这里的非空行即指令。
+_INSTR = re.compile(r"^[\t ]*([A-Z=+\-*/][A-Z0-9_=<>+\-*/.]*)(?=\s|$)\s*(.*)$")
 # 操作数里的地址（V/M/I/Q/SM + 字节/位）
 _ADDR = re.compile(r"\b(V[BWD]?\d+(?:\.\d)?|[MIQ][BWD]?\d+(?:\.\d)?|SM[BWD]?\d+(?:\.\d)?|VD\d+|T\d+|C\d+|HC\d+|AC\d+)\b")
 

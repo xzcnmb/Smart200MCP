@@ -22,6 +22,7 @@ native/bootstrap/*.txt
 
 # ---- 反排除：运行时真正需要的产物 ----
 !native/bootstrap/smarthook_WORKING.dll
+!native/bootstrap/smarthook_v28.dll
 !native/injector/bin/
 native/injector/bin/**
 !native/injector/bin/Release/net8.0/win-x86/injector.exe
@@ -40,3 +41,11 @@ samples/_symfmt/
 samples/bisect/
 samples/_verify/
 _tmpcheck/
+
+# ---- 本机零散文件，不入库 ----
+cpa_*.cjs
+errors.log
+最新/
+native/bootstrap/*.dll.bak*
+smart200_mcp.egg-info/
+ssh_probe.cjs

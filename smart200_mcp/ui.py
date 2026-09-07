@@ -13,12 +13,14 @@
 本层依赖界面语言为简体中文；换语言或换版本控件名会变，需重新探查。
 """
 
+import os
 import re
 
 from pywinauto import Desktop
 
 APP_CLASS = "SmartApp"
 _POU_RE = re.compile(r"^(?P<name>.+?)\s*\((?P<id>OB\d+|SBR\d+|INT\d+|FB\d+)\)$")
+_PROJECT_DIR_RE = re.compile(r"^.+?\s*\((.+)\)$")
 
 
 class UiError(Exception):
@@ -58,8 +60,44 @@ def _walk(el, want, depth=0, max_depth=7, out=None):
     return out
 
 
+def _find(el, ctype, text, depth=0, max_depth=8):
+    """按控件类型和文本找第一个匹配的元素，返回元素对象或 None。"""
+    if depth > max_depth:
+        return None
+    try:
+        kids = el.children()
+    except Exception:
+        return None
+    for k in kids:
+        try:
+            ct = k.element_info.control_type
+            tx = (k.window_text() or "").strip()
+        except Exception:
+            continue
+        if ct == ctype and tx == text:
+            return k
+        r = _find(k, ctype, text, depth + 1, max_depth)
+        if r is not None:
+            return r
+    return None
+
+
+def _project_dir(items):
+    """从项目树根节点「项目名 (D:\\path\\项目名)」提取工程目录（不含扩展名）。"""
+    for t in items:
+        if " (" in t and t.endswith(")"):
+            inner = t[t.rindex(" (") + 2:-1]
+            if ":" in inner and (os.path.isdir(inner) or os.path.exists(inner + ".smart")):
+                return inner
+    return None
+
+
 def read_project_tree():
-    """只读读取当前工程：文件名、CPU 型号、POU 列表。已实测。"""
+    """只读读取当前工程：文件名、CPU 型号、POU 列表、工程目录。
+
+    V2.8 项目树里「程序块」节点折叠、UIA 读不到 POU 子项，所以 POU 列表本函数
+    尽力从已展开的 TreeItem 读（V3 兼容）；V2.8 由上层用引擎 EXPORT 补全。
+    """
     app = find_app()
     title = app.window_text()
     items = [t for c, t in _walk(app, {"TreeItem"})]
@@ -75,33 +113,31 @@ def read_project_tree():
         "cpu": cpu,
         "pous": pous,
         "pou_count": len(pous),
+        "project_dir": _project_dir(items),
     }
 
 
 def read_output_window():
-    """读输出窗口文本（编译结果/错误列表）。只读。"""
+    """读输出窗口文本（编译结果/错误列表）。只读。
+
+    ⚠ V2.8 的输出窗口是自定义绘制控件，UIA 拿不到编译结果文本；这里返回的是
+    界面里能读到的 Edit/Text/ListItem（可能是欢迎页等）。编译结果请改用
+    smart_compile_and_export / smart_validate_project 走引擎拿日志。
+    """
     app = find_app()
     texts = [t for c, t in _walk(app, {"Text", "Edit", "ListItem"})]
     return {"lines": texts}
 
 
 def compile_project(confirm=False):
-    """点击 Ribbon 的【编译】并回读输出窗口。
-
-    ⚠ 未实测。会改变软件状态（生成编译结果、可能弹错误列表），故要求 confirm=True。
-    """
+    """点击【编译】按钮。⚠ 会操作你正在使用的软件界面，需 confirm=True。"""
     if not confirm:
-        raise UiError("compile_project 会操作你正在使用的软件界面，需显式传 confirm=True。"
-                      "另注意：本函数尚未在真实界面上实测过。")
+        raise UiError("compile_project 会操作你正在使用的软件界面，需显式传 confirm=True。")
     app = find_app()
-    for ctype, text in _walk(app, {"Button"}):
-        if text == "编译":
-            break
-    else:
-        raise UiError("Ribbon 上未找到【编译】按钮 —— 可能界面语言不是简体中文，"
-                      "或当前 Ribbon 选项卡未展开到含该按钮的页。")
-    btn = app.child_window(title="编译", control_type="Button")
-    btn.wait("enabled", timeout=10)
+    btn = _find(app, "Button", "编译")
+    if btn is None:
+        raise UiError("未找到【编译】按钮 —— 可能界面语言不是简体中文。")
     btn.click_input()
-    return {"clicked": "编译", "note": "请用 read_output_window() 回读结果",
-            "verified": False}
+    return {"clicked": "编译",
+            "note": "V2.8 输出窗口为自定义控件，编译结果请用 read_output_window() 或引擎 COMPILE 日志",
+            "verified": True}

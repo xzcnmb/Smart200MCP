@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart200-mcp"
+version = "0.6.0"
+description = "STEP 7-Micro/WIN SMART (S7-200 SMART) MCP 服务器：离线工程解析、引擎注入部署、在线点位/监控、运行控制、交叉引用"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.0.0",
+    "python-snap7>=3.1.0",
+    "pywinauto>=0.6.9",
+]
+
+[project.optional-dependencies]
+xlsx = ["openpyxl>=3.0"]
+
+[project.scripts]
+smart200-mcp = "smart200_mcp.server:main"
+
+[tool.setuptools]
+packages = ["smart200_mcp"]
+
+[tool.setuptools.package-data]
+smart200_mcp = [
+    "native/bootstrap/*.dll",
+    "native/bootstrap/*.exe",
+    "native/injector/bin/Release/net8.0/win-x86/*",
+]

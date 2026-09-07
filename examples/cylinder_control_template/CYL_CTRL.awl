@@ -1,0 +1,141 @@
+SUBROUTINE_BLOCK CYL_CTRL:SBR0
+TITLE=Two cylinder sequence template
+// I0.0 A retract, I0.1 A extend, I0.2 B retract, I0.3 B extend
+// I0.4 Start, I0.5 Safety OK, I0.6 Auto, I0.7 Reset
+// I1.0..I1.3 manual A+,A-,B+,B-; Q0.0..Q0.3 valve outputs
+BEGIN
+Network 1
+	LD     SM0.1
+	R      M0.0, 4
+Network 2
+	LD     SM0.1
+	R      M10.0, 5
+Network 3
+	LD     SM0.1
+	S      M10.0, 1
+Network 4
+	LD     I0.7
+	A      I0.5
+	R      M0.2, 2
+Network 5
+	LDN    I0.5
+	R      M0.0, 1
+Network 6
+	LDN    I0.5
+	R      M10.0, 5
+Network 7
+	LDN    I0.5
+	S      M0.2, 1
+Network 8
+	LD     I0.5
+	AN     M0.2
+	=      M0.1
+Network 9
+	LD     I0.4
+	A      I0.6
+	A      M10.0
+	A      M0.1
+	A      I0.0
+	A      I0.2
+	S      M0.0, 1
+Network 10
+	LD     I0.4
+	A      I0.6
+	A      M10.0
+	A      M0.1
+	A      I0.0
+	A      I0.2
+	R      M10.0, 1
+Network 11
+	LD     I0.4
+	A      I0.6
+	A      M10.0
+	A      M0.1
+	A      I0.0
+	A      I0.2
+	S      M10.1, 1
+Network 12
+	LD     M10.1
+	A      I0.1
+	S      M10.2, 1
+Network 13
+	LD     M10.1
+	A      I0.1
+	R      M10.1, 1
+Network 14
+	LD     M10.2
+	A      I0.3
+	S      M10.3, 1
+Network 15
+	LD     M10.2
+	A      I0.3
+	R      M10.2, 1
+Network 16
+	LD     M10.3
+	A      I0.2
+	S      M10.4, 1
+Network 17
+	LD     M10.3
+	A      I0.2
+	R      M10.3, 1
+Network 18
+	LD     M10.4
+	A      I0.0
+	R      M10.4, 1
+Network 19
+	LD     M10.4
+	A      I0.0
+	S      M10.0, 1
+Network 20
+	LDN    I0.6
+	A      I1.0
+	AN     I0.1
+	AN     I1.1
+	=      M20.0
+Network 21
+	LDN    I0.6
+	A      I1.1
+	AN     I0.0
+	AN     I1.0
+	=      M20.1
+Network 22
+	LDN    I0.6
+	A      I1.2
+	AN     I0.3
+	AN     I1.3
+	=      M20.2
+Network 23
+	LDN    I0.6
+	A      I1.3
+	AN     I0.2
+	AN     I1.2
+	=      M20.3
+Network 24
+	LD     M0.0
+	A      M10.1
+	O      M20.0
+	A      M0.1
+	AN     M20.1
+	=      Q0.0
+Network 25
+	LD     M0.0
+	A      M10.4
+	O      M20.1
+	A      M0.1
+	AN     M20.0
+	=      Q0.1
+Network 26
+	LD     M0.0
+	A      M10.2
+	O      M20.2
+	A      M0.1
+	AN     M20.3
+	=      Q0.2
+Network 27
+	LD     M0.0
+	A      M10.3
+	O      M20.3
+	A      M0.1
+	AN     M20.2
+	=      Q0.3
+END_SUBROUTINE_BLOCK

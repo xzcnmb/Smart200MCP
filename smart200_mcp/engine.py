@@ -21,8 +21,8 @@ from . import enginelog, paths
 
 # 路径一律走 paths 模块（自动探测 + 环境变量/配置覆盖），这里不再有硬编码
 BASE = paths.BOOTSTRAP
-INJECTOR = paths.INJECTOR
-DLL = paths.DLL
+INJECTOR = paths.injector()
+DLL = paths.engine_dll()
 CMD_FILE = paths.CMD_FILE
 RESULT_FILE = paths.RESULT_FILE
 
